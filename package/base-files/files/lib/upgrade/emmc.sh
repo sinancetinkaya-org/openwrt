@@ -3,6 +3,69 @@
 
 . /lib/functions.sh
 
+emmc_check_kernel_size() {
+	local image="$1"
+	local file_type="$2"
+	local kernel_dev="$EMMC_KERN_DEV"
+	local partition_blocks
+	local kernel_size
+	local board_dir
+	local gz
+	local has_kernel
+
+	[ -n "$file_type" ] || file_type="$(identify_magic_long "$(get_magic_long "$image")")"
+	case "$file_type" in
+		fit)
+			has_kernel=1
+			kernel_size="$(get_image "$image" | fwtool -i /dev/null -T - | wc -c)"
+			;;
+		*)
+			[ "$(identify_magic_long "$(get_magic_long "$image" cat)")" = "gzip" ] && gz="z"
+			board_dir="$(tar t${gz}f "$image" | grep -m 1 '^sysupgrade-.*/$')"
+			board_dir=${board_dir%/}
+			[ -n "$board_dir" ] || {
+				echo "Unable to find sysupgrade directory in image" >&2
+				return 74
+			}
+			tar t${gz}f "$image" "${board_dir}/kernel" >/dev/null 2>&1 || return 0
+			has_kernel=1
+			kernel_size="$(tar x${gz}f "$image" "${board_dir}/kernel" -O | wc -c)"
+			;;
+	esac
+
+	[ "$has_kernel" = 1 ] || return 0
+	[ -n "$CI_KERNPART" -a -z "$kernel_dev" ] && {
+		kernel_dev="$(find_mmc_part "$CI_KERNPART" "$CI_ROOTDEV")"
+		EMMC_KERN_DEV="$kernel_dev"
+		export EMMC_KERN_DEV
+	}
+	[ -n "$kernel_dev" ] || {
+		echo "Unable to find eMMC kernel partition" >&2
+		return 74
+	}
+	partition_blocks="$(cat "/sys/class/block/${kernel_dev##*/}/size" 2>/dev/null)" || {
+		echo "Unable to read size of $kernel_dev" >&2
+		return 74
+	}
+	case "$partition_blocks" in
+		''|*[!0-9]*)
+			echo "Unable to determine kernel partition size" >&2
+			return 74
+			;;
+	esac
+	case "$kernel_size" in
+		''|*[!0-9]*)
+			echo "Unable to determine kernel image or partition size" >&2
+			return 74
+			;;
+	esac
+
+	if [ "$(((kernel_size + 511) / 512))" -gt "$partition_blocks" ]; then
+		echo "Kernel image is ${kernel_size} bytes, exceeding $kernel_dev capacity of ${partition_blocks} 512-byte blocks" >&2
+		return 74
+	fi
+}
+
 emmc_upgrade_tar() {
 	local tar_file="$1"
 	[ "$CI_KERNPART" -a -z "$EMMC_KERN_DEV" ] && export EMMC_KERN_DEV="$(find_mmc_part $CI_KERNPART $CI_ROOTDEV)"
@@ -75,6 +138,8 @@ emmc_copy_config() {
 
 emmc_do_upgrade() {
 	local file_type=$(identify_magic_long "$(get_magic_long "$1")")
+
+	emmc_check_kernel_size "$1" "$file_type" || return 1
 
 	case "$file_type" in
 		"fit")  emmc_upgrade_fit $1;;

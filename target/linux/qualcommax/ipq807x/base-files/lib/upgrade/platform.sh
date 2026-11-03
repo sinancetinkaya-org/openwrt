@@ -183,8 +183,41 @@ linksys_mx_pre_upgrade() {
 	fi
 }
 
+zyxel_nbg7815_select_upgrade_partitions() {
+	local config_mtdnum
+	local part_num
+
+	config_mtdnum="$(find_mtd_index 0:bootconfig)"
+	[ -n "$config_mtdnum" ] || return 1
+	part_num="$(hexdump -e '1/1 "%01x|"' -n 1 -s 168 -C /dev/mtd$config_mtdnum | cut -f 1 -d "|" | head -n1)"
+
+	case "$part_num" in
+	0)
+		CI_KERNPART="0:HLOS"
+		CI_ROOTPART="rootfs"
+		;;
+	1)
+		CI_KERNPART="0:HLOS_1"
+		CI_ROOTPART="rootfs_1"
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
 platform_check_image() {
-	return 0;
+	case "$(board_name)" in
+	zyxel,nbg7815)
+		zyxel_nbg7815_select_upgrade_partitions || {
+			echo "Unable to determine NBG7815 kernel slot" >&2
+			return 74
+		}
+		emmc_check_kernel_size "$1"
+		return $?
+		;;
+	esac
+	return 0
 }
 
 platform_pre_upgrade() {
@@ -347,18 +380,9 @@ platform_do_upgrade() {
 		nand_do_upgrade "$1"
 		;;
 	zyxel,nbg7815)
-		local config_mtdnum="$(find_mtd_index 0:bootconfig)"
-		[ -z "$config_mtdnum" ] && reboot
-		part_num="$(hexdump -e '1/1 "%01x|"' -n 1 -s 168 -C /dev/mtd$config_mtdnum | cut -f 1 -d "|" | head -n1)"
-		if [ "$part_num" -eq "0" ]; then
-			CI_KERNPART="0:HLOS"
-			CI_ROOTPART="rootfs"
-		else
-			CI_KERNPART="0:HLOS_1"
-			CI_ROOTPART="rootfs_1"
-		fi
-		emmc_do_upgrade "$1"
-		zyxel_nbg7815_reset_overlay_if_fresh_sysupgrade
+		zyxel_nbg7815_select_upgrade_partitions || return 1
+		emmc_do_upgrade "$1" || return 1
+		zyxel_nbg7815_reset_overlay_if_fresh_sysupgrade || return 1
 		;;
 	*)
 		default_do_upgrade "$1"
